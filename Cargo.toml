@@ -1,0 +1,6 @@
+[package]
+name = "db_tutorial"
+version = "0.1.0"
+authors = ["Brian Chen <brianchen.czq@gmail.com>"]
+
+[dependencies]
