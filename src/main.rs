@@ -1,4 +1,4 @@
-#![feature(const_fn)]
+#![feature(const_size_of)]
 use std::io;
 use std::io::prelude::*;
 use std::cmp;
@@ -19,21 +19,18 @@ struct Row {
 
 impl Row {
     fn new(id: u32, username: &[u8], email: &[u8]) -> Self {
-        Row {
+        let username_len = cmp::min(MAX_UNAME_LENGTH, username.len());
+        let email_len = cmp::min(MAX_EMAIL_LENGTH, email.len());
+        let mut row = Row {
             id: id,
-            username_len: username.len() as u32,
-            username: {
-                let mut tmp = [0; MAX_UNAME_LENGTH];
-                tmp[..cmp::min(MAX_UNAME_LENGTH, username.len())].clone_from_slice(username);
-                tmp
-            },
-            email_len: email.len() as u32,
-            email: {
-                let mut tmp = [0; MAX_EMAIL_LENGTH];
-                tmp[..cmp::min(MAX_EMAIL_LENGTH, email.len())].clone_from_slice(email);
-                tmp
-            },
-        }
+            username_len: username_len as u32,
+            username: [0; MAX_UNAME_LENGTH],
+            email_len: email_len as u32,
+            email: [0; MAX_EMAIL_LENGTH],
+        };
+        row.username[..username_len].clone_from_slice(&username[..username_len]);
+        row.email[..email_len].clone_from_slice(&email[..email_len]);
+        row
     }
 }
 
@@ -173,6 +170,8 @@ fn do_meta_command(command: &str) -> Result<MetaCommand, ParseError> {
 enum ParseError {
     Unrecognized,
     InvalidSyntax,
+    StringTooLong,
+    NegativeID,
 }
 
 enum Statement {
@@ -186,10 +185,13 @@ fn prepare_statement(input: &str) -> Result<Statement, ParseError> {
         let _ = tokens.next(); // skip "insert"
         match (tokens.next(), tokens.next(), tokens.next()) {
             (Some(id_str), Some(username), Some(email)) => {
-                let id = id_str.parse::<u32>().map_err(|_| ParseError::InvalidSyntax)?;
-                Ok(Statement::Insert(
-                    Row::new(id, username.as_bytes(), email.as_bytes()),
-                ))
+                let id = id_str.parse::<i32>().map_err(|_| ParseError::InvalidSyntax)?;
+                if id < 0 { return Err(ParseError::NegativeID) }
+                let (uname_bytes, email_bytes) = (username.as_bytes(), email.as_bytes());
+                if uname_bytes.len() > MAX_UNAME_LENGTH || email_bytes.len() > MAX_EMAIL_LENGTH {
+                    return Err(ParseError::StringTooLong)
+                } 
+                Ok(Statement::Insert(Row::new(id as u32, uname_bytes, email_bytes)))
             }
             _ => Err(ParseError::InvalidSyntax),
         }
@@ -250,13 +252,19 @@ fn main() {
             match prepare_statement(&input) {
                 Ok(statement) => match execute_statement(statement, &mut table) {
                     Ok(()) => println!("Executed."),
-                    Err(ExecuteError::TableFull) => println!("Error: table full"),
-                },
+                    Err(ExecuteError::TableFull) => println!("Error: Table full."),
+                }
                 Err(ParseError::Unrecognized) => {
                     println!("Unrecognized keyword at start of {}", input)
                 }
+                Err(ParseError::NegativeID) => {
+                    println!("ID must be positive.")
+                }
+                Err(ParseError::StringTooLong) => {
+                    println!("String is too long.")
+                }
                 Err(ParseError::InvalidSyntax) => {
-                    println!("Syntax error: could not parse statement")
+                    println!("Syntax error: could not parse statement.")
                 }
             }
         }
