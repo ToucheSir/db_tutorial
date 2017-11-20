@@ -1,0 +1,30 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "(Windows) Launch",
+            "type": "cppvsdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/target/debug/db_tutorial.exe",
+            "args": ["${workspaceFolder}\\test.db"],
+            "stopAtEntry": false,
+            "cwd": "${workspaceFolder}",
+            "environment": [],
+            "externalConsole": true
+        },
+        {
+            "type": "lldb-mi",
+            "request": "launch",
+            "name": "Launch Program",
+            "target": "./target/Debug/db_tutorial.exe",
+            "cwd": "${workspaceRoot}"
+        },
+        {
+            "name": "Debug",
+            "type": "lldb-mi",
+            "request": "launch",
+            "target": "./target/Debug/db_tutorial.exe",
+            "cwd": "${workspaceRoot}"
+        }
+    ]
+}
