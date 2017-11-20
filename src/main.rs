@@ -1,26 +1,25 @@
 #![feature(const_size_of)]
-extern crate byteorder;
+
+#[macro_use]
+extern crate serde_derive;
+extern crate serde;
+extern crate bincode;
+
+mod btree;
+mod serde_ext;
 
 use std::io;
 use std::io::prelude::*;
-use std::cmp;
-use std::fmt;
-use std::str;
 use std::env;
 use std::fs::{File, OpenOptions};
-use byteorder::{ReadBytesExt, WriteBytesExt, LE};
+
+use bincode::{serialize_into, deserialize_from, Infinite};
+
+use btree::{Row};
 
 const MAX_UNAME_LENGTH: usize = 32;
-const MAX_EMAIL_LENGTH: usize = 256;
+const MAX_EMAIL_LENGTH: usize = 255;
 
-#[derive(Copy)]
-struct Row {
-    id: u32,
-    username_len: u32,
-    username: [u8; MAX_UNAME_LENGTH],
-    email_len: u32,
-    email: [u8; MAX_EMAIL_LENGTH],
-}
 const ROW_SIZE: usize = std::mem::size_of::<Row>();
 
 #[derive(Debug)]
@@ -95,11 +94,11 @@ impl Pager {
     }
 
     fn read_into_row<R: Read>(&self, reader: &mut R, row: &mut Row) -> io::Result<()> {
-        row.id = reader.read_u32::<LE>()?;
-        row.username_len = reader.read_u32::<LE>()?;
-        reader.read(&mut row.username)?;
-        row.email_len = reader.read_u32::<LE>()?;
-        reader.read(&mut row.email)?;
+        *row = deserialize_from(reader, Infinite).unwrap();
+        // row.username_len = reader.read_u8()?;
+        // reader.read(&mut row.username)?;
+        // row.email_len = reader.read_u8()?;
+        // reader.read(&mut row.email)?;
         Ok(())
     }
 
@@ -165,11 +164,12 @@ impl Pager {
             out.seek(io::SeekFrom::Start(page_num as u64 * PAGE_SIZE))
                 .unwrap();
             for r in page.rows[..rows].iter() {
-                out.write_u32::<LE>(r.id)?;
-                out.write_u32::<LE>(r.username_len)?;
-                out.write(&r.username)?;
-                out.write_u32::<LE>(r.email_len)?;
-                out.write(&r.email)?;
+                serialize_into(&mut out, &r, Infinite);
+                // out.write_u32::<LE>(r.id)?;
+                // out.write_u8(r.username_len)?;
+                // out.write(&r.username)?;
+                // out.write_u8(r.email_len)?;
+                // out.write(&r.email)?;
             }
         }
         Ok(())
@@ -181,64 +181,25 @@ impl Pager {
             out.seek(io::SeekFrom::Start(page_num as u64 * PAGE_SIZE))
                 .unwrap();
             for r in page.rows.iter() {
-                out.write_u32::<LE>(r.id)?;
-                out.write_u32::<LE>(r.username_len)?;
-                out.write(&r.username)?;
-                out.write_u32::<LE>(r.email_len)?;
-                out.write(&r.email)?;
+                serialize_into(&mut out, &r, Infinite);
+                out.flush();
+                // out.write_u32::<LE>(r.id)?;
+                // out.write_u8(r.username_len)?;
+                // out.write(&r.username)?;
+                // out.write_u8(r.email_len)?;
+                // out.write(&r.email)?;
             }
         }
         Ok(())
     }
 }
 
-impl Row {
-    fn new(id: u32, username: &[u8], email: &[u8]) -> Self {
-        let username_len = cmp::min(MAX_UNAME_LENGTH, username.len());
-        let email_len = cmp::min(MAX_EMAIL_LENGTH, email.len());
-        let mut row = Row {
-            id: id,
-            username_len: username_len as u32,
-            username: [0; MAX_UNAME_LENGTH],
-            email_len: email_len as u32,
-            email: [0; MAX_EMAIL_LENGTH],
-        };
-        row.username[..username_len].copy_from_slice(&username[..username_len]);
-        row.email[..email_len].copy_from_slice(&email[..email_len]);
-        row
-    }
-}
-
-impl Default for Row {
-    fn default() -> Self {
-        Row {
-            id: 0,
-            username_len: 0,
-            username: [0; MAX_UNAME_LENGTH],
-            email_len: 0,
-            email: [0; MAX_EMAIL_LENGTH],
-        }
-    }
-}
-
 // Hack because not all fixed-size array struct members are `Clone`
-impl Clone for Row {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-
-impl fmt::Display for Row {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        match (
-            str::from_utf8(&self.username[..self.username_len as usize]),
-            str::from_utf8(&self.email[..self.email_len as usize]),
-        ) {
-            (Ok(username), Ok(email)) => write!(f, "({}, {}, {})", self.id, username, email),
-            _ => Err(fmt::Error),
-        }
-    }
-}
+// impl Clone for Row {
+//     fn clone(&self) -> Self {
+//         *self
+//     }
+// }
 
 const ROWS_PER_PAGE: usize = 4096 / std::mem::size_of::<Row>();
 const TABLE_MAX_PAGES: usize = 100;
