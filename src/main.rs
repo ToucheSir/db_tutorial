@@ -29,6 +29,35 @@ enum PagerError {
     CouldNotRead,
 }
 
+struct Cursor<'a> {
+    table: &'a mut Table,
+    row_num: u32,
+    end_of_table: bool,
+}
+
+impl<'a> Cursor<'a> {
+    fn get_value(&mut self) -> &Row {
+        let row_num = self.row_num as usize;
+        let (page_num, row_offset) = (row_num / ROWS_PER_PAGE, row_num % ROWS_PER_PAGE);
+        let page = self.table.pager.get_page(page_num).unwrap();
+        page.get_row(row_offset)
+    }
+
+    fn set_value(&mut self, val: &Row) {
+        let row_num = self.row_num as usize;
+        let (page_num, row_offset) = (row_num / ROWS_PER_PAGE, row_num % ROWS_PER_PAGE);
+        let page = self.table.pager.get_page_mut(page_num).unwrap();
+        page.set_row(row_offset, val);
+    }
+
+    fn advance(&mut self) {
+        self.row_num += 1;
+        if self.row_num >= self.table.num_rows {
+            self.end_of_table = true;
+        }
+    }
+}
+
 struct Pager {
     // f: io::BufReader<File>,
     fd: File,
@@ -85,7 +114,7 @@ impl Pager {
                 Some(ref page) => Ok(page),
                 None => {
                     let mut new_page = self.allocate_page(page_num as u64).unwrap();
-                        // .map_err(|_| PagerError::CouldNotRead)?;
+                    // .map_err(|_| PagerError::CouldNotRead)?;
                     self.pages[page_num] = Some(new_page);
                     Ok(self.pages[page_num].as_ref().unwrap())
                 }
@@ -98,14 +127,15 @@ impl Pager {
         let num_pages = self.file_size / PAGE_SIZE + ((self.file_size % PAGE_SIZE != 0) as u64);
 
         if (page_num as u64) < num_pages {
-            self.fd.seek(io::SeekFrom::Start(page_num as u64 * PAGE_SIZE))?;
+            self.fd
+                .seek(io::SeekFrom::Start(page_num as u64 * PAGE_SIZE))?;
             let mut row_bytes = [0u8; ROW_SIZE];
             for row in new_page.rows.iter_mut() {
                 match self.fd.read(&mut row_bytes) {
                     Ok(ROW_SIZE) => self.read_into_row(&mut row_bytes.as_ref(), row)?,
                     Ok(0) => break,
                     Ok(_) => return Err(io::Error::from(io::ErrorKind::UnexpectedEof)),
-                    Err(e) => return Err(e)
+                    Err(e) => return Err(e),
                 }
             }
         }
@@ -161,12 +191,6 @@ impl Pager {
         Ok(())
     }
 }
-
-// impl Drop for Pager {
-//     fn drop(&mut self) {
-//         for i in 0..self.pages.len() {}
-//     }
-// }
 
 impl Row {
     fn new(id: u32, username: &[u8], email: &[u8]) -> Self {
@@ -247,7 +271,7 @@ struct Table {
     num_rows: u32,
 }
 
-impl Table {
+impl<'a> Table {
     fn new(pager: Box<Pager>) -> Self {
         Table {
             num_rows: (pager.file_size / ROW_SIZE as u64) as u32,
@@ -255,21 +279,22 @@ impl Table {
         }
     }
 
-    fn row_slot<'a>(&'a mut self, row_num: usize) -> &'a Row {
-        let (page_num, row_offset) = (row_num / ROWS_PER_PAGE, row_num % ROWS_PER_PAGE);
-        let page = self.pager.get_page(page_num).unwrap();
-        page.get_row(row_offset)
+    fn start(&mut self) -> Box<Cursor> {
+        let end_of_table = self.num_rows == 0;
+        Box::new(Cursor {
+            table: self,
+            row_num: 0,
+            end_of_table,
+        })
     }
 
-    fn insert_row(&mut self, row: &Row, row_num: usize) -> Result<(), ExecuteError> {
-        if self.num_rows >= TABLE_MAX_ROWS {
-            Err(ExecuteError::TableFull)
-        } else {
-            let (page_num, row_offset) = (row_num / ROWS_PER_PAGE, row_num % ROWS_PER_PAGE);
-            let page = self.pager.get_page_mut(page_num).unwrap();
-            page.set_row(row_offset, row);
-            Ok(())
-        }
+    fn end(&mut self) -> Box<Cursor> {
+        let row_num = self.num_rows;
+        Box::new(Cursor {
+            table: self,
+            row_num,
+            end_of_table: true,
+        })
     }
 }
 
@@ -331,15 +356,23 @@ enum ExecuteError {
 }
 
 fn execute_insert(row: &Row, table: &mut Table) -> Result<(), ExecuteError> {
-    let num_rows = table.num_rows as usize;
-    table.insert_row(row, num_rows)?;
+    let num_rows = table.num_rows;
+    if num_rows >= TABLE_MAX_ROWS {
+        return Err(ExecuteError::TableFull);
+    }
+    {
+        let mut cursor = table.end();
+        cursor.set_value(row);
+    }
     table.num_rows += 1;
     Ok(())
 }
 
 fn execute_select(table: &mut Table) -> Result<(), ExecuteError> {
-    for i in 0..table.num_rows {
-        println!("{}", table.row_slot(i as usize));
+    let mut cursor = table.start();
+    while !cursor.end_of_table {
+        println!("{}", cursor.get_value());
+        cursor.advance();
     }
     Ok(())
 }
