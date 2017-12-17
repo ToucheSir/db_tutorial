@@ -227,6 +227,7 @@ impl<'a> Table {
 enum MetaCommand {
     Exit,
     PrintConstants,
+    PrintTree,
 }
 
 fn do_meta_command(command: &str) -> Result<MetaCommand, ParseError> {
@@ -234,6 +235,8 @@ fn do_meta_command(command: &str) -> Result<MetaCommand, ParseError> {
         Ok(MetaCommand::Exit)
     } else if command.starts_with(".constants") {
         Ok(MetaCommand::PrintConstants)
+    } else if command.starts_with(".btree") {
+        Ok(MetaCommand::PrintTree)
     } else {
         Err(ParseError::Unrecognized)
     }
@@ -382,6 +385,10 @@ fn main() {
                     Ok(MetaCommand::PrintConstants) => {
                         println!("Constants:");
                         print_constants();
+                    }
+                    Ok(MetaCommand::PrintTree) => {
+                        println!("Tree:");
+                        print!("{:?}", table.pager.get_page(0).unwrap());
                     }
                     Err(ParseError::Unrecognized) => println!("Unrecognized command '{}'", input),
                     _ => {}

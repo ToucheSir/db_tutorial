@@ -126,3 +126,21 @@ impl Node {
         }
     }
 }
+
+impl fmt::Debug for Node {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            &Node::Leaf {
+                num_cells,
+                ref cells,
+                ..
+            } => {
+                writeln!(f, "leaf (size {})", num_cells)?;
+                for (i, &Cell(key, ..)) in cells[..num_cells as usize].iter().enumerate() {
+                    writeln!(f, "  - {} : {}", i, key)?;
+                }
+                Ok(())
+            }
+        }
+    }
+}

@@ -109,4 +109,23 @@ describe("database", () => {
       "db > "
     ]);
   });
+  it("allows printing out the structure of a one-node btree", () => {
+    const script = [3, 1, 2].map(
+      i => `insert ${i} user${i} person${i}@example.com`
+    );
+    script.push(".btree");
+    script.push(".exit");
+    const result = run_script(script);
+    assert.deepEqual(result, [
+      "db > Executed.",
+      "db > Executed.",
+      "db > Executed.",
+      "db > Tree:",
+      "leaf (size 3)",
+      "  - 0 : 3",
+      "  - 1 : 1",
+      "  - 2 : 2",
+      "db > "
+    ]);
+  });
 });
