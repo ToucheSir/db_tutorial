@@ -13,7 +13,7 @@ pub struct Row {
     username: [u8; MAX_UNAME_LENGTH as usize],
     email_len: u8,
     #[serde(with = "BigArray")] email: [u8; MAX_EMAIL_LENGTH as usize],
-    _pad: [u8; 3],
+    // _pad: [u8; 3],
 }
 
 impl Row {
@@ -26,7 +26,7 @@ impl Row {
             username: [0; MAX_UNAME_LENGTH as usize],
             email_len: email_len as u8,
             email: [0; MAX_EMAIL_LENGTH as usize],
-            _pad: Default::default(),
+            // _pad: Default::default(),
         };
         row.username[..username_len].copy_from_slice(&username[..username_len]);
         row.email[..email_len].copy_from_slice(&email[..email_len]);
@@ -42,7 +42,7 @@ impl Default for Row {
             username: [0; MAX_UNAME_LENGTH],
             email_len: 0,
             email: [0; MAX_EMAIL_LENGTH],
-            _pad: Default::default(),
+            // _pad: Default::default(),
         }
     }
 }

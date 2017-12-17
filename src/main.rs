@@ -11,6 +11,7 @@ mod serde_ext;
 use std::io;
 use std::io::prelude::*;
 use std::env;
+use std::mem::{align_of, size_of};
 use std::fs::{File, OpenOptions};
 
 use bincode::{deserialize_from, serialize_into, Infinite};
@@ -124,7 +125,7 @@ impl Pager {
                 Some(ref page) => {
                     let _page = page;
                     Ok(page)
-                },
+                }
                 None => {
                     let mut new_page = self.allocate_page(page_num)
                         .map_err(|_| PagerError::CouldNotRead)?;
@@ -172,8 +173,10 @@ impl Pager {
 
     fn flush_page(&mut self, page_num: usize) -> Result<(), io::Error> {
         if let Some(ref page) = self.pages[page_num] {
-            self.fd.seek(io::SeekFrom::Start(page_num as u64 * PAGE_SIZE as u64))?;
-            serialize_into(&mut self.fd, &page, Infinite);
+            self.fd
+                .seek(io::SeekFrom::Start(page_num as u64 * PAGE_SIZE as u64))?;
+            serialize_into(&mut self.fd, &page, Infinite)
+                .map_err(|_| io::Error::from(io::ErrorKind::Other))?;
         }
         Ok(())
     }
@@ -197,7 +200,7 @@ impl<'a> Table {
     fn start(&mut self) -> Box<Cursor> {
         let page_num = self.root_page_num;
         let end_of_table = match self.pager.get_page(page_num as usize).unwrap() {
-            &Node::Leaf { num_cells, .. } => num_cells == 0
+            &Node::Leaf { num_cells, .. } => num_cells == 0,
         };
         Box::new(Cursor {
             table: self,
@@ -223,11 +226,14 @@ impl<'a> Table {
 
 enum MetaCommand {
     Exit,
+    PrintConstants,
 }
 
 fn do_meta_command(command: &str) -> Result<MetaCommand, ParseError> {
     if command.starts_with(".exit") {
         Ok(MetaCommand::Exit)
+    } else if command.starts_with(".constants") {
+        Ok(MetaCommand::PrintConstants)
     } else {
         Err(ParseError::Unrecognized)
     }
@@ -314,6 +320,22 @@ fn print_prompt() {
     io::stdout().flush().unwrap();
 }
 
+fn print_constants() {
+    // TODO should we change these to better reflect our impl?
+    // should we do repr(C) or repr(packed) for our structs as well?
+    let row_size: usize = size_of::<Row>() - 3;
+    let common_node_header_size: usize = size_of::<u8>() + size_of::<bool>() + size_of::<u32>();
+    let leaf_node_header_size: usize = common_node_header_size + size_of::<u32>();
+    let leaf_node_cell_size: usize = size_of::<btree::Cell>() - 3;
+    let leaf_node_space_for_cells: usize = PAGE_SIZE - leaf_node_header_size;
+    println!("ROW_SIZE: {}", row_size);
+    println!("COMMON_NODE_HEADER_SIZE: {}", common_node_header_size);
+    println!("LEAF_NODE_HEADER_SIZE: {}", leaf_node_header_size);
+    println!("LEAF_NODE_CELL_SIZE: {}", leaf_node_cell_size);
+    println!("LEAF_NODE_SPACE_FOR_CELLS: {}", leaf_node_space_for_cells);
+    println!("LEAF_NODE_MAX_CELLS: {}", btree::LEAF_NODE_MAX_CELLS);
+}
+
 fn db_open(filename: &str) -> Result<Table, io::Error> {
     let mut pager = Pager::open(filename)?;
     if pager.num_pages == 0 {
@@ -357,23 +379,27 @@ fn main() {
             if let Some('.') = input.chars().next() {
                 match do_meta_command(&input) {
                     Ok(MetaCommand::Exit) => break,
+                    Ok(MetaCommand::PrintConstants) => {
+                        println!("Constants:");
+                        print_constants();
+                    }
                     Err(ParseError::Unrecognized) => println!("Unrecognized command '{}'", input),
                     _ => {}
                 }
-            }
-
-            match prepare_statement(&input) {
-                Ok(statement) => match execute_statement(statement, &mut table) {
-                    Ok(()) => println!("Executed."),
-                    Err(ExecuteError::TableFull) => println!("Error: Table full."),
-                },
-                Err(ParseError::Unrecognized) => {
-                    println!("Unrecognized keyword at start of {}", input)
-                }
-                Err(ParseError::NegativeID) => println!("ID must be positive."),
-                Err(ParseError::StringTooLong) => println!("String is too long."),
-                Err(ParseError::InvalidSyntax) => {
-                    println!("Syntax error: could not parse statement.")
+            } else {
+                match prepare_statement(&input) {
+                    Ok(statement) => match execute_statement(statement, &mut table) {
+                        Ok(()) => println!("Executed."),
+                        Err(ExecuteError::TableFull) => println!("Error: Table full."),
+                    },
+                    Err(ParseError::Unrecognized) => {
+                        println!("Unrecognized keyword at start of {}", input)
+                    }
+                    Err(ParseError::NegativeID) => println!("ID must be positive."),
+                    Err(ParseError::StringTooLong) => println!("String is too long."),
+                    Err(ParseError::InvalidSyntax) => {
+                        println!("Syntax error: could not parse statement.")
+                    }
                 }
             }
         }
