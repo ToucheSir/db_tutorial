@@ -1,9 +1,9 @@
 #![feature(const_size_of)]
 
+extern crate bincode;
+extern crate serde;
 #[macro_use]
 extern crate serde_derive;
-extern crate serde;
-extern crate bincode;
 
 mod btree;
 mod serde_ext;
@@ -13,14 +13,12 @@ use std::io::prelude::*;
 use std::env;
 use std::fs::{File, OpenOptions};
 
-use bincode::{serialize_into, deserialize_from, Infinite};
+use bincode::{deserialize_from, serialize_into, Infinite};
 
-use btree::{Row};
+use btree::{Node, Row, PAGE_SIZE};
 
 const MAX_UNAME_LENGTH: usize = 32;
 const MAX_EMAIL_LENGTH: usize = 255;
-
-const ROW_SIZE: usize = std::mem::size_of::<Row>();
 
 #[derive(Debug)]
 enum PagerError {
@@ -30,38 +28,54 @@ enum PagerError {
 
 struct Cursor<'a> {
     table: &'a mut Table,
-    row_num: u32,
+    page_num: u32,
+    cell_num: u32,
     end_of_table: bool,
 }
 
 impl<'a> Cursor<'a> {
     fn get_value(&mut self) -> &Row {
-        let row_num = self.row_num as usize;
-        let (page_num, row_offset) = (row_num / ROWS_PER_PAGE, row_num % ROWS_PER_PAGE);
+        let page_num = self.page_num as usize;
         let page = self.table.pager.get_page(page_num).unwrap();
-        page.get_row(row_offset)
+        match page {
+            &Node::Leaf { ref cells, .. } => &(cells[self.cell_num as usize].1),
+        }
     }
 
     fn set_value(&mut self, val: &Row) {
-        let row_num = self.row_num as usize;
-        let (page_num, row_offset) = (row_num / ROWS_PER_PAGE, row_num % ROWS_PER_PAGE);
+        let page_num = self.page_num as usize;
         let page = self.table.pager.get_page_mut(page_num).unwrap();
-        page.set_row(row_offset, val);
+        match page {
+            &mut Node::Leaf { ref mut cells, .. } => {
+                cells[self.cell_num as usize].set_val(val);
+            }
+        }
     }
 
     fn advance(&mut self) {
-        self.row_num += 1;
-        if self.row_num >= self.table.num_rows {
-            self.end_of_table = true;
+        let page_num = self.page_num as usize;
+        let node = self.table.pager.get_page(page_num).unwrap();
+        self.cell_num += 1;
+        match node {
+            &Node::Leaf { num_cells, .. } if self.cell_num >= num_cells => {
+                self.end_of_table = true;
+            }
+            _ => {}
         }
+    }
+
+    fn insert(&mut self, key: u32, val: &Row) {
+        let page_num = self.page_num as usize;
+        let page = self.table.pager.get_page_mut(page_num).unwrap();
+        page.insert(self.cell_num, key, val);
     }
 }
 
 struct Pager {
-    // f: io::BufReader<File>,
     fd: File,
     file_size: u64,
-    pages: [Option<Box<Page>>; TABLE_MAX_PAGES],
+    pages: [Option<Box<Node>>; TABLE_MAX_PAGES],
+    num_pages: usize,
 }
 
 impl Pager {
@@ -70,7 +84,7 @@ impl Pager {
             fd: f,
             file_size,
             pages: {
-                let mut array: [Option<Box<Page>>; 100] = unsafe { std::mem::uninitialized() };
+                let mut array: [Option<Box<Node>>; 100] = unsafe { std::mem::uninitialized() };
                 for i in array.iter_mut() {
                     unsafe {
                         ::std::ptr::write(i, None);
@@ -78,6 +92,7 @@ impl Pager {
                 }
                 array
             },
+            num_pages: file_size as usize / PAGE_SIZE,
         }
     }
 
@@ -93,16 +108,12 @@ impl Pager {
         Ok(pager)
     }
 
-    fn read_into_row<R: Read>(&self, reader: &mut R, row: &mut Row) -> io::Result<()> {
-        *row = deserialize_from(reader, Infinite).unwrap();
-        // row.username_len = reader.read_u8()?;
-        // reader.read(&mut row.username)?;
-        // row.email_len = reader.read_u8()?;
-        // reader.read(&mut row.email)?;
-        Ok(())
-    }
+    // fn read_into_row<R: Read>(&self, reader: &mut R, row: &mut Row) -> io::Result<()> {
+    //     std::mem::replace(row, deserialize_from(reader, Infinite));
+    //     Ok(())
+    // }
 
-    fn get_page<'a>(&'a mut self, page_num: usize) -> Result<&'a Page, PagerError> {
+    fn get_page<'a>(&'a mut self, page_num: usize) -> Result<&'a Node, PagerError> {
         if page_num > TABLE_MAX_PAGES {
             Err(PagerError::OutOfBounds {
                 page_num,
@@ -110,44 +121,33 @@ impl Pager {
             })
         } else {
             match self.pages[page_num] {
-                Some(ref page) => Ok(page),
+                Some(ref page) => {
+                    let _page = page;
+                    Ok(page)
+                },
                 None => {
-                    let mut new_page = self.allocate_page(page_num as u64).unwrap();
-                    // .map_err(|_| PagerError::CouldNotRead)?;
+                    let mut new_page = self.allocate_page(page_num)
+                        .map_err(|_| PagerError::CouldNotRead)?;
                     self.pages[page_num] = Some(new_page);
+                    if page_num >= self.num_pages {
+                        self.num_pages = page_num + 1;
+                    }
                     Ok(self.pages[page_num].as_ref().unwrap())
                 }
             }
         }
     }
 
-    fn allocate_page(&mut self, page_num: u64) -> io::Result<Box<Page>> {
-        let mut new_page = Box::new(Page::new());
-        let num_pages = self.file_size / PAGE_SIZE + ((self.file_size % PAGE_SIZE != 0) as u64);
-
-        if (page_num as u64) < num_pages {
-            self.fd
-                .seek(io::SeekFrom::Start(page_num as u64 * PAGE_SIZE))?;
-            let mut row_bytes = [0u8; ROW_SIZE];
-            for row in new_page.rows.iter_mut() {
-                match self.fd.read(&mut row_bytes) {
-                    Ok(ROW_SIZE) => self.read_into_row(&mut row_bytes.as_ref(), row)?,
-                    Ok(0) => break,
-                    Ok(_) => return Err(io::Error::from(io::ErrorKind::UnexpectedEof)),
-                    Err(e) => return Err(e),
-                }
-            }
-        }
-        Ok(new_page)
-    }
-
-    fn get_page_mut<'a>(&'a mut self, page_num: usize) -> Result<&'a mut Page, PagerError> {
+    fn get_page_mut<'a>(&'a mut self, page_num: usize) -> Result<&'a mut Node, PagerError> {
         match self.pages[page_num] {
             Some(ref mut page) => Ok(page),
             None => {
-                let mut new_page = self.allocate_page(page_num as u64)
+                let mut new_page = self.allocate_page(page_num)
                     .map_err(|_| PagerError::CouldNotRead)?;
                 self.pages[page_num] = Some(new_page);
+                if page_num >= self.num_pages {
+                    self.num_pages = page_num + 1;
+                }
                 Ok(self.pages[page_num].as_mut().unwrap())
                 // match self.pages[page_num as usize] {
                 //     Some(ref mut page) => page.borrow_mut(),
@@ -157,103 +157,65 @@ impl Pager {
         }
     }
 
-    // FIXME get rid of this
-    fn flush_partial(&mut self, page_num: usize, rows: usize) -> Result<(), io::Error> {
-        if let Some(ref page) = self.pages[page_num] {
-            let mut out = io::BufWriter::with_capacity(ROW_SIZE * rows, &mut self.fd);
-            out.seek(io::SeekFrom::Start(page_num as u64 * PAGE_SIZE))
-                .unwrap();
-            for r in page.rows[..rows].iter() {
-                serialize_into(&mut out, &r, Infinite);
-                // out.write_u32::<LE>(r.id)?;
-                // out.write_u8(r.username_len)?;
-                // out.write(&r.username)?;
-                // out.write_u8(r.email_len)?;
-                // out.write(&r.email)?;
-            }
-        }
-        Ok(())
+    fn allocate_page(&mut self, page_num: usize) -> io::Result<Box<Node>> {
+        let num_pages = self.file_size as usize / PAGE_SIZE
+            + ((self.file_size as usize % PAGE_SIZE != 0) as usize);
+
+        Ok(if page_num < num_pages {
+            self.fd
+                .seek(io::SeekFrom::Start((page_num * PAGE_SIZE) as u64))?;
+            deserialize_from(&mut self.fd, Infinite).unwrap()
+        } else {
+            Box::new(Node::create_leaf())
+        })
     }
 
     fn flush_page(&mut self, page_num: usize) -> Result<(), io::Error> {
-        let mut out = io::BufWriter::with_capacity(PAGE_SIZE as usize, &mut self.fd);
         if let Some(ref page) = self.pages[page_num] {
-            out.seek(io::SeekFrom::Start(page_num as u64 * PAGE_SIZE))
-                .unwrap();
-            for r in page.rows.iter() {
-                serialize_into(&mut out, &r, Infinite);
-                out.flush();
-                // out.write_u32::<LE>(r.id)?;
-                // out.write_u8(r.username_len)?;
-                // out.write(&r.username)?;
-                // out.write_u8(r.email_len)?;
-                // out.write(&r.email)?;
-            }
+            self.fd.seek(io::SeekFrom::Start(page_num as u64 * PAGE_SIZE as u64))?;
+            serialize_into(&mut self.fd, &page, Infinite);
         }
         Ok(())
     }
 }
 
-// Hack because not all fixed-size array struct members are `Clone`
-// impl Clone for Row {
-//     fn clone(&self) -> Self {
-//         *self
-//     }
-// }
-
-const ROWS_PER_PAGE: usize = 4096 / std::mem::size_of::<Row>();
 const TABLE_MAX_PAGES: usize = 100;
-const TABLE_MAX_ROWS: u32 = (ROWS_PER_PAGE * TABLE_MAX_PAGES) as u32;
-const PAGE_SIZE: u64 = std::mem::size_of::<Page>() as u64;
-
-#[derive(Copy, Clone)]
-struct Page {
-    rows: [Row; ROWS_PER_PAGE],
-}
-
-impl Page {
-    fn new() -> Self {
-        Page {
-            rows: [Default::default(); ROWS_PER_PAGE],
-        }
-    }
-
-    fn get_row<'a>(&'a self, row_num: usize) -> &'a Row {
-        &self.rows[row_num]
-    }
-
-    fn set_row<'a>(&'a mut self, row_num: usize, row: &Row) {
-        self.rows[row_num] = *row;
-    }
-}
 
 struct Table {
     pager: Box<Pager>,
-    num_rows: u32,
+    root_page_num: u32,
 }
 
 impl<'a> Table {
     fn new(pager: Box<Pager>) -> Self {
         Table {
-            num_rows: (pager.file_size / ROW_SIZE as u64) as u32,
+            root_page_num: 0,
             pager,
         }
     }
 
     fn start(&mut self) -> Box<Cursor> {
-        let end_of_table = self.num_rows == 0;
+        let page_num = self.root_page_num;
+        let end_of_table = match self.pager.get_page(page_num as usize).unwrap() {
+            &Node::Leaf { num_cells, .. } => num_cells == 0
+        };
         Box::new(Cursor {
             table: self,
-            row_num: 0,
+            page_num,
+            cell_num: 0,
             end_of_table,
         })
     }
 
     fn end(&mut self) -> Box<Cursor> {
-        let row_num = self.num_rows;
+        let page_num = self.root_page_num;
+        let cell_num = match self.pager.get_page(self.root_page_num as usize).unwrap() {
+            &Node::Leaf { num_cells, .. } => num_cells,
+        };
         Box::new(Cursor {
             table: self,
-            row_num,
+            page_num,
+            cell_num,
             end_of_table: true,
         })
     }
@@ -317,15 +279,17 @@ enum ExecuteError {
 }
 
 fn execute_insert(row: &Row, table: &mut Table) -> Result<(), ExecuteError> {
-    let num_rows = table.num_rows;
-    if num_rows >= TABLE_MAX_ROWS {
+    use btree::LEAF_NODE_MAX_CELLS;
+    let num_cells = match table.pager.get_page(table.root_page_num as usize).unwrap() {
+        &Node::Leaf { num_cells, .. } => num_cells as usize,
+    };
+    if num_cells >= LEAF_NODE_MAX_CELLS {
         return Err(ExecuteError::TableFull);
     }
     {
         let mut cursor = table.end();
-        cursor.set_value(row);
+        cursor.insert(row.id, row);
     }
-    table.num_rows += 1;
     Ok(())
 }
 
@@ -351,19 +315,17 @@ fn print_prompt() {
 }
 
 fn db_open(filename: &str) -> Result<Table, io::Error> {
-    let pager = Pager::open(filename)?;
+    let mut pager = Pager::open(filename)?;
+    if pager.num_pages == 0 {
+        let _ = pager.get_page(0);
+    }
     let table = Table::new(pager);
     Ok(table)
 }
 
 fn db_close(table: &mut Table) -> Result<(), io::Error> {
-    let full_pages = table.num_rows as usize / ROWS_PER_PAGE;
-    for i in 0..full_pages {
+    for i in 0..table.pager.num_pages {
         table.pager.flush_page(i)?;
-    }
-    let remaining_rows = table.num_rows as usize % ROWS_PER_PAGE;
-    if remaining_rows > 0 {
-        table.pager.flush_partial(full_pages, remaining_rows)?;
     }
     Ok(())
 }
