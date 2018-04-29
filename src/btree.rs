@@ -88,6 +88,7 @@ pub enum Node {
         num_cells: u32,
         cells: [Cell; LEAF_NODE_MAX_CELLS],
     },
+    Internal
 }
 
 impl Node {
@@ -122,7 +123,8 @@ impl Node {
                 c.set_val(val);
                 c.set_key(key);
                 *num_cells += 1;
-            }
+            },
+            _ => {}
         }
     }
 }
@@ -140,7 +142,8 @@ impl fmt::Debug for Node {
                     writeln!(f, "  - {} : {}", i, key)?;
                 }
                 Ok(())
-            }
+            },
+            _ => Ok(())
         }
     }
 }

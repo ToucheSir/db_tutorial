@@ -8,11 +8,11 @@ extern crate serde_derive;
 mod btree;
 mod serde_ext;
 
+use std::env;
+use std::fs::{File, OpenOptions};
 use std::io;
 use std::io::prelude::*;
-use std::env;
 use std::mem::{align_of, size_of};
-use std::fs::{File, OpenOptions};
 
 use bincode::{deserialize_from, serialize_into, Infinite};
 
@@ -40,6 +40,7 @@ impl<'a> Cursor<'a> {
         let page = self.table.pager.get_page(page_num).unwrap();
         match page {
             &Node::Leaf { ref cells, .. } => &(cells[self.cell_num as usize].1),
+            _ => unimplemented!("Internal node"),
         }
     }
 
@@ -50,6 +51,7 @@ impl<'a> Cursor<'a> {
             &mut Node::Leaf { ref mut cells, .. } => {
                 cells[self.cell_num as usize].set_val(val);
             }
+            _ => unimplemented!("Internal node"),
         }
     }
 
@@ -197,10 +199,36 @@ impl<'a> Table {
         }
     }
 
+    fn find(&mut self, key: u32) -> Box<Cursor> {
+        let root_page_num = self.root_page_num;
+        let index = {
+            if let Node::Leaf {
+                num_cells, cells, ..
+            } = self.pager.get_page(root_page_num as usize).unwrap()
+            {
+                match cells[..*num_cells as usize]
+                    .binary_search_by_key(&key, |&btree::Cell(k, _)| k)
+                {
+                    Ok(idx) => idx,
+                    Err(idx) => idx,
+                }
+            } else {
+                unimplemented!("Can't search internal nodes yet")
+            }
+        };
+        Box::new(Cursor {
+            table: self,
+            page_num: root_page_num,
+            cell_num: index as u32,
+            end_of_table: false,
+        })
+    }
+
     fn start(&mut self) -> Box<Cursor> {
         let page_num = self.root_page_num;
         let end_of_table = match self.pager.get_page(page_num as usize).unwrap() {
             &Node::Leaf { num_cells, .. } => num_cells == 0,
+            _ => unimplemented!("Internal node"),
         };
         Box::new(Cursor {
             table: self,
@@ -214,6 +242,7 @@ impl<'a> Table {
         let page_num = self.root_page_num;
         let cell_num = match self.pager.get_page(self.root_page_num as usize).unwrap() {
             &Node::Leaf { num_cells, .. } => num_cells,
+            _ => unimplemented!("Internal node"),
         };
         Box::new(Cursor {
             table: self,
@@ -270,9 +299,11 @@ fn prepare_statement(input: &str) -> Result<Statement, ParseError> {
                 if uname_bytes.len() > MAX_UNAME_LENGTH || email_bytes.len() > MAX_EMAIL_LENGTH {
                     return Err(ParseError::StringTooLong);
                 }
-                Ok(Statement::Insert(
-                    Row::new(id as u32, uname_bytes, email_bytes),
-                ))
+                Ok(Statement::Insert(Row::new(
+                    id as u32,
+                    uname_bytes,
+                    email_bytes,
+                )))
             }
             _ => Err(ParseError::InvalidSyntax),
         }
@@ -284,6 +315,7 @@ fn prepare_statement(input: &str) -> Result<Statement, ParseError> {
 }
 
 enum ExecuteError {
+    DuplicateKey,
     TableFull,
 }
 
@@ -291,13 +323,18 @@ fn execute_insert(row: &Row, table: &mut Table) -> Result<(), ExecuteError> {
     use btree::LEAF_NODE_MAX_CELLS;
     let num_cells = match table.pager.get_page(table.root_page_num as usize).unwrap() {
         &Node::Leaf { num_cells, .. } => num_cells as usize,
+        _ => unimplemented!("Internal node"),
     };
     if num_cells >= LEAF_NODE_MAX_CELLS {
         return Err(ExecuteError::TableFull);
     }
     {
-        let mut cursor = table.end();
-        cursor.insert(row.id, row);
+        let key_to_insert = row.id;
+        let mut cursor = table.find(key_to_insert);
+        if cursor.get_value().id == key_to_insert {
+            return Err(ExecuteError::DuplicateKey);
+        }
+        cursor.insert(key_to_insert, row);
     }
     Ok(())
 }
@@ -398,6 +435,7 @@ fn main() {
                     Ok(statement) => match execute_statement(statement, &mut table) {
                         Ok(()) => println!("Executed."),
                         Err(ExecuteError::TableFull) => println!("Error: Table full."),
+                        Err(ExecuteError::DuplicateKey) => println!("Error: Duplicate key."),
                     },
                     Err(ParseError::Unrecognized) => {
                         println!("Unrecognized keyword at start of {}", input)

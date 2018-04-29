@@ -109,6 +109,7 @@ describe("database", () => {
       "db > "
     ]);
   });
+
   it("allows printing out the structure of a one-node btree", () => {
     const script = [3, 1, 2].map(
       i => `insert ${i} user${i} person${i}@example.com`
@@ -122,9 +123,26 @@ describe("database", () => {
       "db > Executed.",
       "db > Tree:",
       "leaf (size 3)",
-      "  - 0 : 3",
-      "  - 1 : 1",
-      "  - 2 : 2",
+      "  - 0 : 1",
+      "  - 1 : 2",
+      "  - 2 : 3",
+      "db > "
+    ]);
+  });
+
+  it('prints an error message if there is a duplicate id', () => {
+    const script = [
+      "insert 1 user1 person1@example.com",
+      "insert 1 user1 person1@example.com",
+      "select",
+      ".exit"
+    ];
+    const result = run_script(script);
+    assert.deepEqual(result, [
+      "db > Executed.",
+      "db > Error: Duplicate key.",
+      "db > (1, user1, person1@example.com)",
+      "Executed.",
       "db > "
     ]);
   });
